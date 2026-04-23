@@ -278,7 +278,7 @@ export async function callWithFallback(
   const scored = events
     .map((event) => ({ event, score: scoreForProfile(profile, event) }))
     .sort((a, b) => b.score - a.score)
-    .slice(0, 5);
+    .slice(0, 10);
   return scored.map((s) => s.event);
 }
 
@@ -309,7 +309,7 @@ export async function optimizedRecommend(profile: UserProfile): Promise<SearchRe
     globalStats.eventsInPrompt = 0;
     globalStats.tokensPerEvent = 0;
     return {
-      events: scored.map((s) => s.event),
+      events: scored.slice(0, 10).map((s) => s.event),
       stats: getGlobalStats(),
     };
   }
@@ -327,7 +327,7 @@ Here is the student's profile:
 Here are the candidate events (already filtered for the student):
 ${JSON.stringify(slimCandidates)}
 
-Recommend the top 5 most relevant events for this student.
+Recommend the top 10 most relevant events for this student.
 Return ONLY a JSON array of event IDs, like [1, 5, 12].
 Do not include any explanation or other text.`;
 
