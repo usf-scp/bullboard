@@ -44,3 +44,11 @@ As you fill in each function, flip to Optimized mode and watch the cost dashboar
 **Changes to `.env` not taking effect.** Vite reads environment variables at startup. Stop the dev server with Ctrl+C and run `npm run dev` again.
 
 **Port 5173 already in use.** Something else is using that port. Either close it or run `npm run dev -- --port 5174`.
+
+## Stuck or want to check your work?
+
+The completed version of `src/lib/search.ts` lives on the `completed` branch:
+
+\`\`\`bash
+git checkout completed
+\`\`\`
