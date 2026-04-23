@@ -176,13 +176,27 @@ Do not include any explanation or other text.`;
 // When the top event scores above a threshold, we skip the AI entirely.
 
 export function scoreForProfile(profile: UserProfile, event: CampusEvent): number {
-  // TODO: Implement local scoring
-  // 1. Combine profile.interests, profile.bio, and profile.preferences into one lowercase string
-  // 2. Split into tokens, filter out tokens shorter than 3 characters
-  // 3. Combine event title, tags, description, and category into one lowercase string
-  // 4. Count how many profile tokens appear in the event text
-  // 5. Return matches / total tokens (handle the empty case)
-  return 0;
+  const profileText = (
+    profile.interests.join(" ") + " " +
+    profile.bio + " " +
+    profile.preferences
+  ).toLowerCase();
+
+  const profileTokens = profileText
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+
+  if (profileTokens.length === 0) return 0;
+
+  const eventText = (
+    event.title + " " +
+    event.tags.join(" ") + " " +
+    event.description + " " +
+    event.category
+  ).toLowerCase();
+
+  const matches = profileTokens.filter((t) => eventText.includes(t));
+  return matches.length / profileTokens.length;
 }
 
 // ACT 2 — SHRINK THE CALL (outer pruning)
@@ -190,13 +204,20 @@ export function scoreForProfile(profile: UserProfile, event: CampusEvent): numbe
 // and categories outside the user's interests.
 
 export function preFilterForProfile(profile: UserProfile): CampusEvent[] {
-  // TODO: Implement pre-filtering
-  // 1. Get today's date in YYYY-MM-DD format
-  // 2. Filter out events where event.date < today (past events)
-  // 3. Filter out events where event.registered >= event.capacity (full events)
-  // 4. If profile.interests is non-empty, keep only events whose category is in it
-  //    (but if that would empty the list, don't narrow)
-  return events;
+  const today = new Date().toISOString().split("T")[0];
+
+  let filtered = events.filter((e) => {
+    if (e.date < today) return false;
+    if (e.registered >= e.capacity) return false;
+    return true;
+  });
+
+  if (profile.interests.length > 0) {
+    const byInterest = filtered.filter((e) => profile.interests.includes(e.category));
+    if (byInterest.length > 0) filtered = byInterest;
+  }
+
+  return filtered;
 }
 
 // ACT 2 — SHRINK THE CALL (inner pruning)
@@ -204,8 +225,13 @@ export function preFilterForProfile(profile: UserProfile): CampusEvent[] {
 // Removes location, time, capacity, registered count, org — tokens we don't pay for.
 
 export function slimEvent(event: CampusEvent) {
-  // TODO: Return an object with only id, title, tags, category, description
-  return event;
+  return {
+    id: event.id,
+    title: event.title,
+    tags: event.tags,
+    category: event.category,
+    description: event.description,
+  };
 }
 
 // ACT 3 TRACK A — SURVIVE RATE LIMITS
@@ -216,13 +242,44 @@ export async function callWithFallback(
   prompt: string,
   profile: UserProfile
 ): Promise<CampusEvent[]> {
-  // TODO: Implement fallback chain
-  // 1. Build an array of keys from import.meta.env (KEY_1, KEY_2, KEY_3)
-  // 2. Loop through each key, create a client, try the Gemini call
-  // 3. On a 429 error, log a warning and continue to the next key
-  // 4. On any other error, re-throw (don't mask real bugs)
-  // 5. If all keys fail, return a sensible fallback based on profile
-  return [];
+  const keys = [
+    import.meta.env.VITE_GEMINI_KEY_1,
+    import.meta.env.VITE_GEMINI_KEY_2,
+    import.meta.env.VITE_GEMINI_KEY_3,
+  ].filter(Boolean) as string[];
+
+  if (keys.length === 0) {
+    const primary = import.meta.env.VITE_GEMINI_API_KEY;
+    if (primary) keys.push(primary);
+  }
+
+  for (const key of keys) {
+    const client = new GoogleGenAI({ apiKey: key });
+    try {
+      const response = await client.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+      });
+
+      const cleaned = (response.text ?? "[]").replace(/```json|```/g, "").trim();
+      const ids: number[] = JSON.parse(cleaned);
+      const matched = ids
+        .map((id) => events.find((e) => e.id === id))
+        .filter(Boolean) as CampusEvent[];
+
+      return matched.length > 0 ? matched : [];
+    } catch (err: any) {
+      if (err.status !== 429) throw err;
+      console.warn("Key rate-limited, trying next...");
+    }
+  }
+
+  console.warn("All keys rate-limited, falling back to local scoring");
+  const scored = events
+    .map((event) => ({ event, score: scoreForProfile(profile, event) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  return scored.map((s) => s.event);
 }
 
 // The optimized path the workshop builds toward.
@@ -235,6 +292,8 @@ export async function callWithFallback(
 const LOCAL_MATCH_THRESHOLD = 0.4;
 
 export async function optimizedRecommend(profile: UserProfile): Promise<SearchResult> {
+  const start = Date.now();
+
   // Step 1: narrow the candidate pool (ACT 2)
   const candidates = preFilterForProfile(profile);
 
@@ -255,15 +314,44 @@ export async function optimizedRecommend(profile: UserProfile): Promise<SearchRe
     };
   }
 
-  // Step 4: no strong local match — we need to call the AI.
-  // TODO (Act 3, end of workshop): Replace the line below with a slimmed,
-  // fallback-protected AI call.
-  // 1. Map candidates through slimEvent to drop unneeded fields
-  // 2. Build a prompt string containing the profile and the slimmed events
-  // 3. Pass the prompt to callWithFallback to get AI recommendations
-  // 4. Update globalStats so the dashboard shows the smaller prompt size
-  // 5. Return the recommended events
-  //
-  // For now, delegate to recommend() so the app still works end-to-end.
-  return recommend(profile);
+  // Step 4: no strong local match — call the AI with a slimmed, fallback-protected request
+  const slimCandidates = candidates.map(slimEvent);
+
+  const prompt = `You are a campus event recommendation engine.
+
+Here is the student's profile:
+- Interests: ${profile.interests.join(", ")}
+- Bio: ${profile.bio}
+- Preferences: ${profile.preferences}
+
+Here are the candidate events (already filtered for the student):
+${JSON.stringify(slimCandidates)}
+
+Recommend the top 5 most relevant events for this student.
+Return ONLY a JSON array of event IDs, like [1, 5, 12].
+Do not include any explanation or other text.`;
+
+  const matchedEvents = await callWithFallback(prompt, profile);
+  const latency = Date.now() - start;
+
+  const slimJson = JSON.stringify(slimCandidates);
+  const tokensEstimated = Math.ceil(prompt.length / 4);
+  const tokensPerEvent = slimCandidates.length > 0
+    ? Math.ceil(slimJson.length / slimCandidates.length / 4)
+    : 0;
+
+  const pricing = PRICING["gemini-2.5-flash"];
+  globalStats.apiCalls += 1;
+  globalStats.totalTokensEstimated += tokensEstimated;
+  globalStats.totalLatencyMs += latency;
+  globalStats.estimatedCost += (tokensEstimated / 1_000_000) * pricing.input;
+  globalStats.strategy = "pre-filtered + slimmed events + key fallback";
+  globalStats.modelUsed = "gemini-2.5-flash";
+  globalStats.eventsInPrompt = slimCandidates.length;
+  globalStats.tokensPerEvent = tokensPerEvent;
+
+  return {
+    events: matchedEvents.length > 0 ? matchedEvents : candidates,
+    stats: getGlobalStats(),
+  };
 }
