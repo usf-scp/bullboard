@@ -15,9 +15,33 @@ import EventCard from "./components/EventCard";
 
 const ALL_INTERESTS = ["tech", "career", "sports", "wellness", "social", "academic"];
 
+// localStorage keys for the profile and the two result caches
+const PROFILE_KEY = "bullboard-profile";
+const ORIGINAL_CACHE_KEY = "bullboard-original-cache";
+const OPTIMIZED_CACHE_KEY = "bullboard-optimized-cache";
+
+// Shape of a cached entry: the profile that produced the results, the events returned,
+// and the stats snapshot from that call. We store the profile so we can detect when
+// the user has edited it and the cache is no longer valid.
+interface CachedResult {
+  profileKey: string;
+  events: CampusEvent[];
+  stats: SearchStats;
+}
+
+// Canonicalize a profile into a stable string key. JSON.stringify is fine here because
+// our profile shape is simple and has a predictable field order.
+function profileKey(profile: UserProfile): string {
+  return JSON.stringify({
+    interests: [...profile.interests].sort(),
+    bio: profile.bio.trim(),
+    preferences: profile.preferences.trim(),
+  });
+}
+
 function loadProfile(): UserProfile | null {
   try {
-    const saved = localStorage.getItem("bullboard-profile");
+    const saved = localStorage.getItem(PROFILE_KEY);
     return saved ? JSON.parse(saved) : null;
   } catch {
     return null;
@@ -25,7 +49,30 @@ function loadProfile(): UserProfile | null {
 }
 
 function saveProfile(profile: UserProfile) {
-  localStorage.setItem("bullboard-profile", JSON.stringify(profile));
+  localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+}
+
+// Read a cached result from localStorage and return it only if its profileKey still
+// matches the current profile. Otherwise return null, which signals the caller to
+// make a fresh API call.
+function loadCache(key: string, currentKey: string): CachedResult | null {
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return null;
+    const parsed: CachedResult = JSON.parse(saved);
+    if (parsed.profileKey !== currentKey) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveCache(key: string, cache: CachedResult) {
+  localStorage.setItem(key, JSON.stringify(cache));
+}
+
+function clearCache(key: string) {
+  localStorage.removeItem(key);
 }
 
 export default function App() {
@@ -43,6 +90,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"search" | "foryou">("search");
+
+  // Track whether the current result came from cache so we can show a small indicator
+  const [fromCache, setFromCache] = useState(false);
 
   useEffect(() => {
     try {
@@ -63,7 +113,7 @@ export default function App() {
     setEditingProfile(false);
   };
 
-  // Local keyword search — no AI, just filtering
+  // Local keyword search — no AI, no cache, instant
   const handleSearch = useCallback(
     (q?: string) => {
       const query = q ?? searchQuery;
@@ -72,19 +122,37 @@ export default function App() {
       setActiveView("search");
       resetStats();
       setStats(getGlobalStats());
+      setFromCache(false);
     },
     [searchQuery]
   );
 
-  // "For You" recommendation — this is where AI gets used
+  // "For You" recommendation — checks the cache first, falls through to the AI call on miss
   const handleForYou = useCallback(async () => {
     if (!profile) {
       setEditingProfile(true);
       return;
     }
+
+    const currentKey = profileKey(profile);
+    const cacheKey = mode === "original" ? ORIGINAL_CACHE_KEY : OPTIMIZED_CACHE_KEY;
+
+    // Cache hit: restore the previous results and stats without touching the API
+    const cached = loadCache(cacheKey, currentKey);
+    if (cached) {
+      setResults(cached.events);
+      setStats(cached.stats);
+      setActiveView("foryou");
+      setFromCache(true);
+      setError(null);
+      return;
+    }
+
+    // Cache miss: run the full recommendation pipeline
     setLoading(true);
     setError(null);
     setActiveView("foryou");
+    setFromCache(false);
     try {
       const result =
         mode === "original"
@@ -92,6 +160,13 @@ export default function App() {
           : await optimizedRecommend(profile);
       setResults(result.events);
       setStats(result.stats);
+
+      // Persist the fresh result for this profile so next click is free
+      saveCache(cacheKey, {
+        profileKey: currentKey,
+        events: result.events,
+        stats: result.stats,
+      });
     } catch (err: any) {
       setError(err.message || "Something went wrong");
     } finally {
@@ -105,6 +180,7 @@ export default function App() {
     setResults([]);
     setStats(getGlobalStats());
     setError(null);
+    setFromCache(false);
   };
 
   const handleReset = () => {
@@ -112,6 +188,17 @@ export default function App() {
     setResults([]);
     setStats(getGlobalStats());
     setError(null);
+    setFromCache(false);
+  };
+
+  // Clear a single cache entry and wipe the current view if the user is looking at it
+  const handleClearCache = (which: "original" | "optimized") => {
+    const key = which === "original" ? ORIGINAL_CACHE_KEY : OPTIMIZED_CACHE_KEY;
+    clearCache(key);
+    if (mode === which && activeView === "foryou") {
+      setResults([]);
+      setFromCache(false);
+    }
   };
 
   const toggleInterest = (interest: string) => {
@@ -307,11 +394,34 @@ export default function App() {
                 ? "Set up profile first"
                 : "Get Recommendations"}
           </button>
+
+          {/* Cache controls — clear either mode's cached result independently. */}
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => handleClearCache("original")}
+              className="flex-1 rounded-lg border border-neutral-800 px-3 py-1.5 text-[10px] uppercase tracking-wider text-neutral-500 hover:border-neutral-700 hover:text-neutral-300"
+            >
+              Clear Original Cache
+            </button>
+            <button
+              onClick={() => handleClearCache("optimized")}
+              className="flex-1 rounded-lg border border-neutral-800 px-3 py-1.5 text-[10px] uppercase tracking-wider text-neutral-500 hover:border-neutral-700 hover:text-neutral-300"
+            >
+              Clear Optimized Cache
+            </button>
+          </div>
         </div>
 
         {activeView === "foryou" && stats.apiCalls > 0 && (
           <div className="mb-6">
             <CostDashboard stats={stats} mode={mode} />
+          </div>
+        )}
+
+        {/* Cache-hit indicator so it's obvious the dashboard numbers are from a prior call */}
+        {fromCache && activeView === "foryou" && (
+          <div className="mb-6 rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3 text-xs text-emerald-300">
+            Served from cache — no API call made. Click "Clear {mode === "original" ? "Original" : "Optimized"} Cache" to force a fresh call.
           </div>
         )}
 

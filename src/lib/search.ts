@@ -127,7 +127,7 @@ Here is the student's profile:
 Here is the complete list of campus events:
 ${JSON.stringify(events, null, 2)}
 
-Based on this student's profile, recommend the top 5 most relevant events.
+Based on this student's profile, recommend the top 10 most relevant events.
 Return ONLY a JSON array of event IDs, like [1, 5, 12].
 Do not include any explanation or other text.`;
 
