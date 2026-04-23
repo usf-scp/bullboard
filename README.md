@@ -49,6 +49,6 @@ As you fill in each function, flip to Optimized mode and watch the cost dashboar
 
 The completed version of `src/lib/search.ts` lives on the `completed` branch:
 
-\`\`\`bash
+```bash
 git checkout completed
-\`\`\`
+```
