@@ -176,17 +176,12 @@ Do not include any explanation or other text.`;
 // When the top event scores above a threshold, we skip the AI entirely.
 
 export function scoreForProfile(profile: UserProfile, event: CampusEvent): number {
-  const profileText = (
+  // Boilerplate: turn the profile and the event into bags of words.
+  const profileTokens = (
     profile.interests.join(" ") + " " +
     profile.bio + " " +
     profile.preferences
-  ).toLowerCase();
-
-  const profileTokens = profileText
-    .split(/\s+/)
-    .filter((t) => t.length > 2);
-
-  if (profileTokens.length === 0) return 0;
+  ).toLowerCase().split(/\s+/).filter((t) => t.length > 2);
 
   const eventText = (
     event.title + " " +
@@ -195,6 +190,9 @@ export function scoreForProfile(profile: UserProfile, event: CampusEvent): numbe
     event.category
   ).toLowerCase();
 
+  if (profileTokens.length === 0) return 0;
+
+  // Count how many profileTokens appear in eventText, then normalize.
   const matches = profileTokens.filter((t) => eventText.includes(t));
   return matches.length / profileTokens.length;
 }
@@ -206,12 +204,14 @@ export function scoreForProfile(profile: UserProfile, event: CampusEvent): numbe
 export function preFilterForProfile(profile: UserProfile): CampusEvent[] {
   const today = new Date().toISOString().split("T")[0];
 
+  // Drop past events and full events.
   let filtered = events.filter((e) => {
     if (e.date < today) return false;
     if (e.registered >= e.capacity) return false;
     return true;
   });
 
+  // Narrow to selected interests, but only if it doesn't empty the result.
   if (profile.interests.length > 0) {
     const byInterest = filtered.filter((e) => profile.interests.includes(e.category));
     if (byInterest.length > 0) filtered = byInterest;
@@ -242,6 +242,7 @@ export async function callWithFallback(
   prompt: string,
   profile: UserProfile
 ): Promise<CampusEvent[]> {
+  // Boilerplate: collect available keys, fall back to the primary if no rotation keys are set.
   const keys = [
     import.meta.env.VITE_GEMINI_KEY_1,
     import.meta.env.VITE_GEMINI_KEY_2,
@@ -253,6 +254,7 @@ export async function callWithFallback(
     if (primary) keys.push(primary);
   }
 
+  // Try each key in order. On 429, advance. On any other error, re-throw.
   for (const key of keys) {
     const client = new GoogleGenAI({ apiKey: key });
     try {
@@ -274,6 +276,7 @@ export async function callWithFallback(
     }
   }
 
+  // All keys exhausted — fall back to local scoring so the app never dies.
   console.warn("All keys rate-limited, falling back to local scoring");
   const scored = events
     .map((event) => ({ event, score: scoreForProfile(profile, event) }))
@@ -283,11 +286,7 @@ export async function callWithFallback(
 }
 
 // The optimized path the workshop builds toward.
-// This stub uses preFilterForProfile and scoreForProfile from above.
-// When those are still stubs returning defaults, this function falls through
-// to recommend() — so Optimized mode behaves exactly like Original mode.
-// As you implement each function during the workshop, the dashboard changes
-// to reflect what's happening.
+// Composes preFilterForProfile, scoreForProfile, slimEvent, and callWithFallback.
 
 const LOCAL_MATCH_THRESHOLD = 0.4;
 
@@ -314,7 +313,7 @@ export async function optimizedRecommend(profile: UserProfile): Promise<SearchRe
     };
   }
 
-  // Step 4: no strong local match — call the AI with a slimmed, fallback-protected request
+  // Step 4: no strong local match — call the AI with a slimmed, fallback-protected request.
   const slimCandidates = candidates.map(slimEvent);
 
   const prompt = `You are a campus event recommendation engine.
@@ -334,6 +333,7 @@ Do not include any explanation or other text.`;
   const matchedEvents = await callWithFallback(prompt, profile);
   const latency = Date.now() - start;
 
+  // Update the dashboard to reflect the smaller prompt and the fallback strategy.
   const slimJson = JSON.stringify(slimCandidates);
   const tokensEstimated = Math.ceil(prompt.length / 4);
   const tokensPerEvent = slimCandidates.length > 0
